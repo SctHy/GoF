@@ -145,9 +145,6 @@ function ShellContent({
           </SidebarGroup>
         </SidebarContent>
         <SidebarFooter className="gap-3 p-3">
-          <p className="px-2 text-xs leading-relaxed text-muted-foreground group-data-[collapsible=icon]:hidden">
-            每一次停留，都有新的发现。
-          </p>
           <Separator />
           <SidebarMenu>
             <SidebarMenuItem>
@@ -177,7 +174,7 @@ function ShellContent({
         <SidebarRail />
       </Sidebar>
       <SidebarInset className="min-w-0 md:peer-data-[variant=inset]:shadow-none md:peer-data-[variant=inset]:ring-1 md:peer-data-[variant=inset]:ring-border">
-        <header className="sticky top-0 z-30 flex h-16 shrink-0 items-center gap-3 border-b bg-background/95 px-4 backdrop-blur-sm lg:px-7">
+        <header className="sticky top-0 z-30 flex h-16 shrink-0 items-center gap-3 border-b bg-background px-4 lg:px-7">
           <SidebarTrigger aria-label="切换导航" />
           <Separator orientation="vertical" className="mx-1 h-4!" />
           <span className="hidden text-sm text-muted-foreground sm:inline">

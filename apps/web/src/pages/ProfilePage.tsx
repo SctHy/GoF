@@ -243,7 +243,7 @@ export function ProfilePage({ session, onNavigate }: PageProps) {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">个人主页</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            你的作品，以及一路相遇的人。
+            管理个人资料、作品和关注关系。
           </p>
         </div>
         <Button onClick={() => onNavigate("/upload")}>
@@ -306,7 +306,7 @@ export function ProfilePage({ session, onNavigate }: PageProps) {
       </Card>
       <section className="space-y-5">
         <div className="flex items-center gap-2 border-b pb-4">
-          <h2 className="text-base font-semibold">我的作品</h2>
+          <h2 className="text-xl font-semibold">我的作品</h2>
           <span className="text-sm text-muted-foreground">{videos.length}</span>
         </div>
         <VideoGrid

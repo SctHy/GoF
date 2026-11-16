@@ -101,7 +101,7 @@ export function MessagesPage({
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">消息中心</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            关注每一次回应，与喜欢你的人保持联系。
+            查看点赞、评论和系统通知。
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -126,7 +126,7 @@ export function MessagesPage({
       </div>
       <Card className="gap-0 py-0 shadow-none">
         <div className="flex items-center justify-between border-b px-5 py-4">
-          <h2 className="text-sm font-medium">全部消息</h2>
+          <h2 className="text-xl font-semibold">全部消息</h2>
           <Badge variant="secondary">
             {unreadCount > 0 ? `${unreadCount} 未读` : "已读完"}
           </Badge>
@@ -171,7 +171,7 @@ export function MessagesPage({
                   onClick={() => !message.is_read && markRead([message.id])}
                   disabled={busyID === message.id}
                 >
-                  <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border bg-background text-muted-foreground">
+                  <span className="mt-0.5 shrink-0 text-muted-foreground">
                     <Icon name={messageIcon(message.type)} />
                   </span>
                   <span className="grid min-w-0 flex-1 gap-2">

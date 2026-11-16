@@ -74,17 +74,17 @@ export function VideoGrid({
       {videos.map((video) => (
         <Card
           key={video.id}
-          className="group relative gap-0 overflow-hidden py-0 shadow-none transition-shadow hover:shadow-md"
+          className="group relative gap-0 overflow-hidden py-0 shadow-none transition-colors duration-150 hover:bg-muted/40"
         >
           <div className="relative aspect-video overflow-hidden bg-muted">
             <img
-              className="size-full object-cover transition-transform duration-300 group-hover:scale-105"
+              className="size-full object-cover"
               src={video.cover_url || DEFAULT_COVER_URL}
               alt=""
               loading="lazy"
             />
             <span className="absolute inset-0 flex items-center justify-center bg-black/5">
-              <span className="flex size-10 items-center justify-center rounded-full bg-black/35 text-white backdrop-blur-sm">
+              <span className="flex size-10 items-center justify-center rounded-full bg-black/60 text-white">
                 <Play className="size-4 fill-current" />
               </span>
             </span>
@@ -234,7 +234,7 @@ export function RelationModal({
             <DialogTitle>
               {props.tab === "following" ? "关注的人" : "粉丝"}
             </DialogTitle>
-            <DialogDescription>发现与你兴趣相投的人。</DialogDescription>
+            <DialogDescription>查看关注和粉丝，管理关注关系。</DialogDescription>
           </div>
           <Button
             variant="ghost"

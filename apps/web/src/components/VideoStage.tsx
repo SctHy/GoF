@@ -304,7 +304,7 @@ export function ActionButton({
             <Button
               variant="secondary"
               size="icon-lg"
-              className={`size-11 rounded-full border border-white/10 bg-white/10 backdrop-blur-sm hover:bg-white/20 ${active ? "text-rose-400" : "text-white"}`}
+              className={`size-11 rounded-full bg-black/60 hover:bg-black/80 ${active ? "text-rose-400" : "text-white"}`}
               onClick={onClick}
               aria-label={actionLabel}
               aria-pressed={active}

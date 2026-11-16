@@ -95,7 +95,7 @@ export function PublicProfilePage({
         </CardContent>
       </Card>
       <section className="space-y-5">
-        <h2 className="border-b pb-4 text-base font-semibold">他的作品</h2>
+        <h2 className="border-b pb-4 text-xl font-semibold">他的作品</h2>
         <VideoGrid
           videos={videos}
           state={videosState}

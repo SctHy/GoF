@@ -90,8 +90,8 @@ export function LoginPage({ session, onNavigate }: PageProps) {
               </CardTitle>
               <CardDescription>
                 {mode === "login"
-                  ? "登录账号，继续发现你喜欢的内容。"
-                  : "创建账号，分享你的精彩瞬间。"}
+                  ? "登录后可点赞、收藏和发布视频。"
+                  : "填写账号、昵称和密码即可注册。"}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -182,9 +182,6 @@ export function LoginPage({ session, onNavigate }: PageProps) {
               </form>
             </CardContent>
           </Card>
-          <p className="text-center text-xs leading-relaxed text-muted-foreground">
-            看见生活里的灵感，也让你的作品被看见。
-          </p>
         </div>
       </div>
     </main>

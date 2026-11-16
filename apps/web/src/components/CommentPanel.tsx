@@ -61,7 +61,7 @@ export function CommentPanel({
             <SheetTitle className="flex items-center gap-2">
               评论 <Badge variant="secondary">{formatMetric(count)}</Badge>
             </SheetTitle>
-            <SheetDescription>聊聊你看到的精彩瞬间。</SheetDescription>
+            <SheetDescription>查看评论或发表回复。</SheetDescription>
           </div>
           <Button
             variant="ghost"

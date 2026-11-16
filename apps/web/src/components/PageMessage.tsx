@@ -5,10 +5,10 @@ import type { MessageProps } from "@/types";
 export function PageMessage({ icon, title, action, onAction }: MessageProps) {
   return (
     <div
-      className="flex min-h-52 flex-col items-center justify-center gap-4 rounded-xl border border-dashed px-6 py-12 text-center"
+      className="flex min-h-52 flex-col items-center justify-center gap-3 px-6 py-12 text-center"
       role="status"
     >
-      <span className="flex size-12 items-center justify-center rounded-2xl border bg-muted/50 text-muted-foreground">
+      <span className="text-muted-foreground">
         <Icon name={icon} />
       </span>
       <p className="max-w-sm text-sm text-muted-foreground">{title}</p>

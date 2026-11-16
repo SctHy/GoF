@@ -1,4 +1,4 @@
-import { ImagePlus, Film, Upload, ArrowLeft } from "lucide-react";
+import { ImagePlus, Upload, ArrowLeft } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -7,7 +7,6 @@ import {
   CardDescription,
 } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
 import { PageMessage } from "@/components/PageMessage";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -97,7 +96,7 @@ export function UploadPage({ session, onNavigate }: PageProps) {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">发布视频</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            把值得分享的瞬间，留在这里。
+            上传视频和封面，填写标题后发布。
           </p>
         </div>
         <Button variant="outline" onClick={() => onNavigate("/profile")}>
@@ -118,14 +117,7 @@ export function UploadPage({ session, onNavigate }: PageProps) {
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="form-field">
                   <Label htmlFor="video-file">视频文件</Label>
-                  <div className="space-y-4 rounded-xl border border-dashed bg-muted/30 p-5">
-                    <Film className="size-7 text-muted-foreground" />
-                    <div>
-                      <p className="text-sm font-medium">选择你的作品</p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        从设备中选择视频文件
-                      </p>
-                    </div>
+                  <div className="space-y-2">
                     <Input
                       id="video-file"
                       aria-label="视频文件"
@@ -140,14 +132,7 @@ export function UploadPage({ session, onNavigate }: PageProps) {
                 </div>
                 <div className="form-field">
                   <Label htmlFor="cover-file">视频封面</Label>
-                  <div className="space-y-4 rounded-xl border border-dashed bg-muted/30 p-5">
-                    <ImagePlus className="size-7 text-muted-foreground" />
-                    <div>
-                      <p className="text-sm font-medium">选一张好封面</p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        让作品的第一眼更吸引人
-                      </p>
-                    </div>
+                  <div className="space-y-2">
                     <Input
                       id="cover-file"
                       aria-label="视频封面"
@@ -223,7 +208,7 @@ export function UploadPage({ session, onNavigate }: PageProps) {
             )}
           </div>
           <CardContent className="space-y-3 p-5">
-            <Badge variant="secondary">作品预览</Badge>
+            <p className="text-xs text-muted-foreground">作品预览</p>
             <h2 className="font-medium wrap-anywhere">
               {form.title || "你的视频标题"}
             </h2>
