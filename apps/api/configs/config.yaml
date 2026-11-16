@@ -1,0 +1,29 @@
+port: 8080
+jwt:
+  secret: ""
+  access_ttl: "15m"
+
+internal:
+  token: ""
+
+database:
+  host: "localhost"
+  port: 3306
+  user: "gcfeed"
+  password: ""
+  name: "GCFeed"
+
+redis:
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+
+rabbitmq:
+  url: ""
+  interaction_exchange: "gcfeed.interaction"
+  action_changed_queue: "gcfeed.interaction.action_changed"
+  action_changed_routing: "interaction.action_changed"
+  video_exchange: "gcfeed.video"
+  video_published_queue: "gcfeed.video.published"
+  video_embedding_queue: "gcfeed.video.embedding"
+  video_published_routing: "video.published"

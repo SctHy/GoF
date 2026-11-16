@@ -1,0 +1,52 @@
+groups:
+  - name: gcfeed
+    rules:
+      - alert: GCFeedAPIDown
+        expr: up{job="gcfeed-api"} == 0 or absent(up{job="gcfeed-api"})
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: API 指标端点不可用
+      - alert: GCFeedAPIHighErrorRate
+        expr: sum(rate(gcfeed_http_requests_total{job="gcfeed-api",status=~"5.."}[5m])) / sum(rate(gcfeed_http_requests_total{job="gcfeed-api"}[5m])) > 0.05 and sum(rate(gcfeed_http_requests_total{job="gcfeed-api"}[5m])) >= 0.2
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: API 5xx 比例超过 5%（至少 12 请求/分钟）
+      - alert: GCFeedAPIHighLatency
+        expr: histogram_quantile(0.95, sum by (le) (rate(gcfeed_http_request_duration_seconds_bucket{job="gcfeed-api"}[5m]))) > 0.5 and sum(rate(gcfeed_http_request_duration_seconds_count{job="gcfeed-api"}[5m])) >= 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: API P95 延迟持续超过 500ms（至少 12 请求/分钟）
+      - alert: GCFeedWorkerDown
+        expr: up{job="gcfeed-worker"} == 0 or absent(up{job="gcfeed-worker"})
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Worker 指标端点不可用
+      - alert: GCFeedOutboxBacklog
+        expr: max(gcfeed_outbox_oldest_pending_age_seconds{job="gcfeed-worker"}) > 60
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 最早 Outbox 待投递事件已等待超过 60 秒
+      - alert: GCFeedOutboxFailed
+        expr: max(gcfeed_outbox_failed{job="gcfeed-worker"}) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Outbox 存在耗尽重试的失败事件
+      - alert: GCFeedOutboxSamplingFailed
+        expr: min(gcfeed_outbox_stats_up{job="gcfeed-worker"}) == 0 or time() - min(gcfeed_outbox_stats_updated_timestamp_seconds{job="gcfeed-worker"}) > 60 or absent(gcfeed_outbox_stats_up{job="gcfeed-worker"})
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Outbox 指标采样失败、缺失或超过 60 秒未更新

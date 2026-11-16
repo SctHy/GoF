@@ -1,0 +1,156 @@
+name: gcfeed
+
+x-app-environment: &app-environment
+  GCFEED_TRUSTED_PROXIES: ${GCFEED_TRUSTED_PROXIES:-}
+  GCFEED_DATABASE_USER: gcfeed
+  GCFEED_DATABASE_PASSWORD: ${GCFEED_DB_PASSWORD:?Run scripts/setup.sh first}
+  GCFEED_JWT_SECRET: ${GCFEED_JWT_SECRET:?Run scripts/setup.sh first}
+  GCFEED_INTERNAL_TOKEN: ${GCFEED_INTERNAL_TOKEN:?Run scripts/setup.sh first}
+  GCFEED_RABBITMQ_URL: amqp://gcfeed:${GCFEED_MQ_PASSWORD:?Run scripts/setup.sh first}@rabbitmq:5672/
+
+services:
+  mysql:
+    image: mysql:8.4.13
+    environment:
+      MYSQL_ROOT_PASSWORD: ${GCFEED_DB_ROOT_PASSWORD:?Run scripts/setup.sh first}
+      MYSQL_USER: gcfeed
+      MYSQL_PASSWORD: ${GCFEED_DB_PASSWORD:?Run scripts/setup.sh first}
+      MYSQL_DATABASE: GCFeed
+    ports:
+      - "127.0.0.1:13307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+
+  redis:
+    image: redis:8.8.4-alpine
+    ports:
+      - "127.0.0.1:16379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:4.4.0-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: gcfeed
+      RABBITMQ_DEFAULT_PASS: ${GCFEED_MQ_PASSWORD:?Run scripts/setup.sh first}
+    ports:
+      - "127.0.0.1:15673:5672"
+      - "127.0.0.1:15674:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 30s
+      retries: 20
+
+  api:
+    environment: *app-environment
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:18080:8080"
+    volumes:
+      - ./api/configs/config.docker.yaml:/app/configs/config.yaml:ro
+      - api_uploads:/app/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ready >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+
+  worker:
+    restart: on-failure
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9091/ready >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+    environment: *app-environment
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    command: ["./gcfeed-worker"]
+    depends_on:
+      api:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - ./api/configs/config.docker.yaml:/app/configs/config.yaml:ro
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:15173:80"
+
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:19090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+
+  grafana:
+    image: grafana/grafana:13.2.6
+    depends_on:
+      - prometheus
+    ports:
+      - "127.0.0.1:13000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GCFEED_GRAFANA_PASSWORD:?Run scripts/setup.sh first}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL: ""
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+volumes:
+  mysql_data:
+  redis_data:
+  rabbitmq_data:
+  api_uploads:
+  prometheus_data:
+  grafana_data:

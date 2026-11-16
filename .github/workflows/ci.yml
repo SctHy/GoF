@@ -1,0 +1,58 @@
+name: checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:8.4.13
+        env:
+          MYSQL_ROOT_PASSWORD: gcfeed-ci-only
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pgcfeed-ci-only --silent"
+          --health-interval=5s --health-timeout=3s --health-retries=30
+      rabbitmq:
+        image: rabbitmq:4.4.0-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: gcfeed
+          RABBITMQ_DEFAULT_PASS: gcfeed-ci-only
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd="rabbitmq-diagnostics -q ping"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    env:
+      GCFEED_REQUIRE_INTEGRATION: '1'
+      GCFEED_TEST_MYSQL_ADMIN_DSN: 'root:gcfeed-ci-only@tcp(127.0.0.1:3306)/?parseTime=true'
+      GCFEED_TEST_RABBITMQ_URL: 'amqp://gcfeed:gcfeed-ci-only@127.0.0.1:5672/'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: apps/api/go.mod
+          cache-dependency-path: apps/api/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install local test tools
+        run: sudo apt-get update && sudo apt-get install -y redis-server ffmpeg
+      - name: Install frontend dependencies
+        run: npm --prefix apps/web ci
+      - name: Tests, race detector, vet and build
+        run: ./scripts/check.sh
+      - name: Frontend dependency audit
+        run: npm --prefix apps/web audit --audit-level=high
+      - name: Prometheus alert syntax and firing/recovery cases
+        run: bash apps/monitoring/check.sh

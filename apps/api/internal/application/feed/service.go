@@ -1,0 +1,666 @@
+package applicationfeed
+
+import (
+	"GCFeed/internal/application/pagination"
+	applicationrecommendation "GCFeed/internal/application/recommendation"
+	domainfeed "GCFeed/internal/domain/feed"
+	domainrecommendation "GCFeed/internal/domain/recommendation"
+	inframetrics "GCFeed/internal/infra/metrics"
+	"context"
+	"crypto/sha1"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"hash/fnv"
+	"strings"
+	"time"
+
+	"golang.org/x/sync/singleflight"
+)
+
+const defaultFeedLimit = 10
+const timelineFirstPageCacheTTL = 5 * time.Second
+const timelinePageCacheTTL = 45 * time.Second
+const feedCardCacheTTL = 15 * time.Minute
+const feedStatCacheTTL = 15 * time.Second
+
+var ErrLoadFeedFailed = errors.New("failed to load feed")
+
+// Service 通过 scene 策略注册表分发不同 Feed 场景。
+type Service struct {
+	repo         domainfeed.Repository
+	strategies   map[domainfeed.Scene]Strategy
+	defaultScene domainfeed.Scene
+}
+
+// Option 用于在装配阶段注册额外 Feed 策略。
+type Option func(*Service)
+
+// FeedRequest 是所有 Feed 场景共用的查询参数。
+type FeedRequest struct {
+	Scene         domainfeed.Scene
+	Cursor        string
+	Limit         int
+	ViewerID      int64
+	ClientContext map[string]string
+}
+
+// FeedResult 是游标分页结果，NextCursor 供客户端请求下一页。
+type FeedResult struct {
+	Scene      domainfeed.Scene
+	Items      []*domainfeed.FeedItem
+	NextCursor string
+	HasMore    bool
+}
+
+// FeedPage 是页缓存中的轻量结果，卡片和计数会在组装阶段批量读取。
+type FeedPage struct {
+	Scene      domainfeed.Scene
+	Items      []*domainfeed.FeedPageItem
+	NextCursor string
+	HasMore    bool
+}
+
+// FeedCache 定义 Feed 页、卡片和计数缓存能力，Redis 实现在基础设施层提供。
+type FeedCache interface {
+	GetPage(ctx context.Context, key string) (*FeedPage, bool, error)
+	SetPage(ctx context.Context, key string, page *FeedPage, ttl time.Duration) error
+	GetCards(ctx context.Context, videoIDs []int64) (map[int64]*domainfeed.FeedCard, error)
+	SetCards(ctx context.Context, cards map[int64]*domainfeed.FeedCard, ttl time.Duration) error
+	GetStats(ctx context.Context, videoIDs []int64) (map[int64]*domainfeed.FeedStat, error)
+	SetStats(ctx context.Context, stats map[int64]*domainfeed.FeedStat, ttl time.Duration) error
+	ListHotWindowPage(ctx context.Context, windowEnd time.Time, offset int, limit int) ([]*domainfeed.FeedPageItem, error)
+}
+
+// Strategy 定义单个 Feed 场景的读取策略。
+type Strategy interface {
+	Scene() domainfeed.Scene
+	List(ctx context.Context, req FeedRequest) (*FeedResult, error)
+}
+
+// TimelineStrategy 复用现有时间线查询能力。
+type TimelineStrategy struct {
+	scene        domainfeed.Scene
+	repo         domainfeed.Repository
+	cache        FeedCache
+	firstPageTTL time.Duration
+	pageTTL      time.Duration
+	group        singleflight.Group
+}
+
+// HotStrategy 使用互动热度读取热榜 Feed。
+type HotStrategy struct {
+	repo      domainfeed.Repository
+	cache     FeedCache
+	snapshots pagination.Cache
+}
+
+// FollowingStrategy 按数据库关系读取关注流。
+type FollowingStrategy struct {
+	repo  domainfeed.Repository
+	cache FeedCache
+}
+
+// RecommendStrategy 使用推荐服务读取排序后的候选，再复用 Feed 卡片组装。
+type RecommendStrategy struct {
+	repo        domainfeed.Repository
+	cache       FeedCache
+	recommender Recommender
+}
+
+type Recommender interface {
+	Recommend(ctx context.Context, input applicationrecommendation.CandidateRequest) (*applicationrecommendation.CandidateResult, error)
+}
+
+type timelineCursorPayload struct {
+	PublishedAt string `json:"published_at"`
+	VideoID     int64  `json:"video_id"`
+}
+
+// WithFeedCache 为 Feed 页、卡片和计数启用读缓存。
+func WithFeedCache(cache FeedCache) Option {
+	return func(s *Service) {
+		for _, strategy := range s.strategies {
+			switch typed := strategy.(type) {
+			case *TimelineStrategy:
+				typed.cache = cache
+			case *HotStrategy:
+				typed.cache = cache
+				if snapshots, ok := cache.(pagination.Cache); ok {
+					typed.snapshots = snapshots
+				}
+			case *FollowingStrategy:
+				typed.cache = cache
+			case *RecommendStrategy:
+				typed.cache = cache
+			}
+		}
+	}
+}
+
+// WithRecommender 注册推荐 Feed 策略。
+func WithRecommender(recommender Recommender) Option {
+	return func(s *Service) {
+		if recommender != nil {
+			s.RegisterStrategy(NewRecommendStrategy(s.repo, recommender))
+		}
+	}
+}
+
+// New 注入 Feed 仓储并注册默认时间线策略。
+func New(repo domainfeed.Repository, options ...Option) *Service {
+	service := &Service{
+		repo:         repo,
+		strategies:   map[domainfeed.Scene]Strategy{},
+		defaultScene: domainfeed.DefaultScene,
+	}
+	service.RegisterStrategy(NewTimelineStrategy(domainfeed.SceneTimeline, repo))
+	service.RegisterStrategy(NewHotStrategy(repo))
+	service.RegisterStrategy(NewFollowingStrategy(repo))
+	for _, option := range options {
+		option(service)
+	}
+	return service
+}
+
+// RegisterStrategy 把 scene 和具体策略绑定，新增 Feed 类型时在装配层调用。
+func (s *Service) RegisterStrategy(strategy Strategy) {
+	if strategy == nil {
+		return
+	}
+	scene := domainfeed.NormalizeScene(strategy.Scene())
+	s.strategies[scene] = strategy
+}
+
+// GetFeed 根据 scene 选择策略并返回分页结果。
+func (s *Service) GetFeed(ctx context.Context, req FeedRequest) (*FeedResult, error) {
+	start := time.Now()
+	req.Scene = domainfeed.NormalizeScene(req.Scene)
+	if req.Scene == "" {
+		req.Scene = s.defaultScene
+	}
+
+	strategy, ok := s.strategies[req.Scene]
+	if !ok {
+		inframetrics.ObserveFeed(string(req.Scene), time.Since(start), 0, domainfeed.ErrUnsupportedScene)
+		return nil, domainfeed.ErrUnsupportedScene
+	}
+	result, err := strategy.List(ctx, req)
+	itemCount := 0
+	if result != nil {
+		itemCount = len(result.Items)
+	}
+	inframetrics.ObserveFeed(string(req.Scene), time.Since(start), itemCount, err)
+	return result, err
+}
+
+// GetTimelineFeed 使用 cursor+limit 读取时间线 Feed。
+func (s *Service) GetTimelineFeed(ctx context.Context, cursor string, limit int) (*FeedResult, error) {
+	return s.GetFeed(ctx, FeedRequest{
+		Scene:  domainfeed.SceneTimeline,
+		Cursor: cursor,
+		Limit:  limit,
+	})
+}
+
+// NewTimelineStrategy 创建一个时间线排序策略，可作为 latest 等场景的基础实现。
+func NewTimelineStrategy(scene domainfeed.Scene, repo domainfeed.Repository) *TimelineStrategy {
+	return &TimelineStrategy{
+		scene:        domainfeed.NormalizeScene(scene),
+		repo:         repo,
+		firstPageTTL: timelineFirstPageCacheTTL,
+		pageTTL:      timelinePageCacheTTL,
+	}
+}
+
+// Scene 返回当前策略绑定的 Feed 场景。
+func (s *TimelineStrategy) Scene() domainfeed.Scene {
+	return s.scene
+}
+
+// List 使用 cursor+limit 读取时间线 Feed。
+func (s *TimelineStrategy) List(ctx context.Context, req FeedRequest) (*FeedResult, error) {
+	parsedCursor, err := parseTimelineCursor(req.Cursor)
+	if err != nil {
+		return nil, err
+	}
+	limit := normalizeLimit(req.Limit)
+
+	page, err := loadFeedPage(ctx, s.cache, s.scene, req.Cursor, limit, s.firstPageTTL, s.pageTTL, &s.group, func() (*FeedPage, error) {
+		return s.listPageFromRepo(ctx, parsedCursor, limit)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	items, err := assembleFeedItems(ctx, s.repo, s.cache, page.Items, req.ViewerID)
+	if err != nil {
+		return nil, ErrLoadFeedFailed
+	}
+
+	return &FeedResult{
+		Scene:      s.scene,
+		Items:      items,
+		NextCursor: page.NextCursor,
+		HasMore:    page.HasMore,
+	}, nil
+}
+
+func (s *TimelineStrategy) listPageFromRepo(ctx context.Context, parsedCursor *domainfeed.TimelineCursor, limit int) (*FeedPage, error) {
+	items, err := s.repo.ListTimelinePage(ctx, parsedCursor, limit+1)
+	if err != nil {
+		return nil, ErrLoadFeedFailed
+	}
+
+	// limit+1 是常见分页技巧：多取一条即可判断后面还有没有数据。
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+
+	nextCursor := ""
+	if len(items) > 0 {
+		// 下一页从当前页最后一个元素之后开始，游标保存排序所需的两个字段。
+		nextCursor = encodeTimelineCursor(&domainfeed.TimelineCursor{
+			PublishedAt: items[len(items)-1].PublishedAt,
+			VideoID:     items[len(items)-1].VideoID,
+		})
+	}
+
+	return &FeedPage{
+		Scene:      s.scene,
+		Items:      items,
+		NextCursor: nextCursor,
+		HasMore:    hasMore,
+	}, nil
+}
+
+// NewFollowingStrategy 创建关注流策略。
+func NewFollowingStrategy(repo domainfeed.Repository) *FollowingStrategy {
+	return &FollowingStrategy{repo: repo}
+}
+
+// Scene 返回关注流场景。
+func (s *FollowingStrategy) Scene() domainfeed.Scene {
+	return domainfeed.SceneFollowing
+}
+
+// List 根据当前登录用户读取关注流。
+func (s *FollowingStrategy) List(ctx context.Context, req FeedRequest) (*FeedResult, error) {
+	if req.ViewerID <= 0 {
+		return nil, domainfeed.ErrViewerRequired
+	}
+	parsedCursor, err := parseTimelineCursor(req.Cursor)
+	if err != nil {
+		return nil, err
+	}
+	limit := normalizeLimit(req.Limit)
+
+	page, err := s.listPageFromRepo(ctx, req.ViewerID, parsedCursor, limit)
+	if err != nil {
+		return nil, err
+	}
+	items, err := assembleFeedItems(ctx, s.repo, s.cache, page.Items, req.ViewerID)
+	if err != nil {
+		return nil, ErrLoadFeedFailed
+	}
+
+	return &FeedResult{
+		Scene:      domainfeed.SceneFollowing,
+		Items:      items,
+		NextCursor: page.NextCursor,
+		HasMore:    page.HasMore,
+	}, nil
+}
+
+func (s *FollowingStrategy) listPageFromRepo(ctx context.Context, viewerID int64, parsedCursor *domainfeed.TimelineCursor, limit int) (*FeedPage, error) {
+	items, err := s.repo.ListFollowingPage(ctx, viewerID, parsedCursor, limit+1)
+	if err != nil {
+		return nil, ErrLoadFeedFailed
+	}
+
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+
+	nextCursor := ""
+	if len(items) > 0 {
+		nextCursor = encodeTimelineCursor(&domainfeed.TimelineCursor{
+			PublishedAt: items[len(items)-1].PublishedAt,
+			VideoID:     items[len(items)-1].VideoID,
+		})
+	}
+
+	return &FeedPage{
+		Scene:      domainfeed.SceneFollowing,
+		Items:      items,
+		NextCursor: nextCursor,
+		HasMore:    hasMore,
+	}, nil
+}
+
+// NewRecommendStrategy 创建推荐 Feed 策略。
+func NewRecommendStrategy(repo domainfeed.Repository, recommender Recommender) *RecommendStrategy {
+	return &RecommendStrategy{
+		repo:        repo,
+		recommender: recommender,
+	}
+}
+
+// Scene 返回推荐场景。
+func (s *RecommendStrategy) Scene() domainfeed.Scene {
+	return domainfeed.SceneRecommend
+}
+
+// List 读取推荐候选，并按推荐服务给出的顺序组装 Feed 卡片。
+func (s *RecommendStrategy) List(ctx context.Context, req FeedRequest) (*FeedResult, error) {
+	if req.ViewerID <= 0 {
+		return nil, domainfeed.ErrViewerRequired
+	}
+	limit := normalizeLimit(req.Limit)
+	result, err := s.recommender.Recommend(ctx, applicationrecommendation.CandidateRequest{
+		UserID:    req.ViewerID,
+		Scene:     string(domainfeed.SceneRecommend),
+		RequestID: clientContextValue(req.ClientContext, "request_id"),
+		Cursor:    req.Cursor,
+		Limit:     limit,
+	})
+	if err != nil {
+		if errors.Is(err, domainrecommendation.ErrInvalidCursor) {
+			return nil, domainfeed.ErrInvalidCursor
+		}
+		if errors.Is(err, applicationrecommendation.ErrLoadRecommendationFailed) {
+			return nil, ErrLoadFeedFailed
+		}
+		return nil, err
+	}
+
+	pageItems := make([]*domainfeed.FeedPageItem, 0, len(result.Candidates))
+	for _, candidate := range result.Candidates {
+		pageItems = append(pageItems, &domainfeed.FeedPageItem{
+			VideoID:     candidate.VideoID,
+			AuthorID:    candidate.AuthorID,
+			PublishedAt: candidate.PublishedAt,
+			HotScore:    candidate.HotScore,
+		})
+	}
+	items, err := assembleFeedItems(ctx, s.repo, s.cache, pageItems, req.ViewerID)
+	if err != nil {
+		return nil, ErrLoadFeedFailed
+	}
+	return &FeedResult{
+		Scene:      domainfeed.SceneRecommend,
+		Items:      items,
+		NextCursor: result.NextCursor,
+		HasMore:    result.HasMore,
+	}, nil
+}
+
+// normalizeLimit 统一默认页大小和最大页大小。
+func normalizeLimit(limit int) int {
+	if limit <= 0 {
+		return defaultFeedLimit
+	}
+	if limit > domainfeed.MaxLimit {
+		return domainfeed.MaxLimit
+	}
+	return limit
+}
+
+func clientContextValue(context map[string]string, key string) string {
+	if context == nil {
+		return ""
+	}
+	return context[key]
+}
+
+func loadFeedPage(ctx context.Context, cache FeedCache, scene domainfeed.Scene, cursor string, limit int, firstPageTTL time.Duration, pageTTL time.Duration, group *singleflight.Group, load func() (*FeedPage, error)) (*FeedPage, error) {
+	if cache == nil || group == nil {
+		return load()
+	}
+
+	cacheKey := feedPageCacheKey(scene, cursor, limit)
+	if page, ok, err := cache.GetPage(ctx, cacheKey); err == nil && ok {
+		return page, nil
+	}
+
+	value, err, _ := group.Do(cacheKey, func() (any, error) {
+		if page, ok, err := cache.GetPage(ctx, cacheKey); err == nil && ok {
+			return page, nil
+		}
+		page, err := load()
+		if err != nil {
+			return nil, err
+		}
+		_ = cache.SetPage(ctx, cacheKey, page, feedPageCacheTTL(cursor, cacheKey, firstPageTTL, pageTTL))
+		return page, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	page, ok := value.(*FeedPage)
+	if !ok {
+		return nil, ErrLoadFeedFailed
+	}
+	return page, nil
+}
+
+func assembleFeedItems(ctx context.Context, repo domainfeed.Repository, cache FeedCache, pageItems []*domainfeed.FeedPageItem, viewerID int64) ([]*domainfeed.FeedItem, error) {
+	videoIDs := feedPageVideoIDs(pageItems)
+	if len(videoIDs) == 0 {
+		return []*domainfeed.FeedItem{}, nil
+	}
+
+	visible, err := repo.FilterVisibleIDs(ctx, videoIDs, viewerID, false)
+	if err != nil {
+		return nil, err
+	}
+	cards := map[int64]*domainfeed.FeedCard{}
+	stats := map[int64]*domainfeed.FeedStat{}
+	if cache != nil {
+		if cachedCards, err := cache.GetCards(ctx, videoIDs); err == nil {
+			cards = cachedCards
+		}
+		if cachedStats, err := cache.GetStats(ctx, videoIDs); err == nil {
+			stats = cachedStats
+		}
+	}
+
+	missingCardIDs := missingCardIDs(videoIDs, cards)
+	if len(missingCardIDs) > 0 {
+		loadedCards, err := repo.BatchGetFeedCards(ctx, missingCardIDs)
+		if err != nil {
+			return nil, err
+		}
+		mergeCards(cards, loadedCards)
+		if cache != nil {
+			_ = cache.SetCards(ctx, loadedCards, feedCardCacheTTL)
+		}
+	}
+
+	missingStatIDs := missingStatIDs(videoIDs, stats)
+	if len(missingStatIDs) > 0 {
+		loadedStats, err := repo.BatchGetFeedStats(ctx, missingStatIDs)
+		if err != nil {
+			return nil, err
+		}
+		mergeStats(stats, loadedStats)
+		if cache != nil {
+			_ = cache.SetStats(ctx, loadedStats, feedStatCacheTTL)
+		}
+	}
+
+	viewerActions := map[int64]*domainfeed.ViewerActionState{}
+	if viewerID > 0 {
+		loadedViewerActions, err := repo.BatchGetViewerActionStates(ctx, viewerID, videoIDs)
+		if err != nil {
+			return nil, err
+		}
+		viewerActions = loadedViewerActions
+	}
+
+	items := make([]*domainfeed.FeedItem, 0, len(pageItems))
+	for _, pageItem := range pageItems {
+		if pageItem == nil || !visible[pageItem.VideoID] {
+			continue
+		}
+		card, ok := cards[pageItem.VideoID]
+		if !ok || card == nil {
+			continue
+		}
+		stat := stats[pageItem.VideoID]
+		if stat == nil {
+			stat = &domainfeed.FeedStat{VideoID: pageItem.VideoID}
+		}
+		publishedAt := pageItem.PublishedAt
+		if publishedAt.IsZero() {
+			publishedAt = card.PublishedAt
+		}
+		item := domainfeed.RestoreFeedItem(
+			card.VideoID,
+			card.AuthorID,
+			card.AuthorNickname,
+			card.AuthorAvatarURL,
+			card.Title,
+			card.Description,
+			card.MediaURL,
+			card.CoverURL,
+			stat.LikeCount,
+			stat.CommentCount,
+			stat.FavoriteCount,
+			publishedAt,
+		)
+		if action := viewerActions[item.VideoID]; action != nil {
+			item.Liked = action.Liked
+			item.Favorited = action.Favorited
+		}
+		item.HotScore = pageItem.HotScore
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func feedPageVideoIDs(items []*domainfeed.FeedPageItem) []int64 {
+	videoIDs := make([]int64, 0, len(items))
+	seen := map[int64]struct{}{}
+	for _, item := range items {
+		if item == nil || item.VideoID <= 0 {
+			continue
+		}
+		if _, ok := seen[item.VideoID]; ok {
+			continue
+		}
+		seen[item.VideoID] = struct{}{}
+		videoIDs = append(videoIDs, item.VideoID)
+	}
+	return videoIDs
+}
+
+func missingCardIDs(videoIDs []int64, cards map[int64]*domainfeed.FeedCard) []int64 {
+	missing := make([]int64, 0)
+	for _, videoID := range videoIDs {
+		if cards[videoID] == nil {
+			missing = append(missing, videoID)
+		}
+	}
+	return missing
+}
+
+func missingStatIDs(videoIDs []int64, stats map[int64]*domainfeed.FeedStat) []int64 {
+	missing := make([]int64, 0)
+	for _, videoID := range videoIDs {
+		if stats[videoID] == nil {
+			missing = append(missing, videoID)
+		}
+	}
+	return missing
+}
+
+func mergeCards(target map[int64]*domainfeed.FeedCard, source map[int64]*domainfeed.FeedCard) {
+	for videoID, card := range source {
+		if card != nil {
+			target[videoID] = card
+		}
+	}
+}
+
+func mergeStats(target map[int64]*domainfeed.FeedStat, source map[int64]*domainfeed.FeedStat) {
+	for videoID, stat := range source {
+		if stat != nil {
+			target[videoID] = stat
+		}
+	}
+}
+
+func feedPageCacheKey(scene domainfeed.Scene, cursor string, limit int) string {
+	scene = domainfeed.NormalizeScene(scene)
+	cursor = strings.TrimSpace(cursor)
+	if cursor == "" {
+		return fmt.Sprintf("feed:page:v1:%s:limit:%d:first", scene, limit)
+	}
+
+	sum := sha1.Sum([]byte(cursor))
+	return fmt.Sprintf("feed:page:v1:%s:limit:%d:cursor:%s", scene, limit, hex.EncodeToString(sum[:]))
+}
+
+func feedPageCacheTTL(cursor string, cacheKey string, firstPageTTL time.Duration, pageTTL time.Duration) time.Duration {
+	ttl := pageTTL
+	if strings.TrimSpace(cursor) == "" {
+		ttl = firstPageTTL
+	}
+	if ttl <= 0 {
+		return 0
+	}
+
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(cacheKey))
+	jitterPercent := 10 + int(hasher.Sum32()%11)
+	return ttl + time.Duration(jitterPercent)*ttl/100
+}
+
+// parseTimelineCursor 将客户端传回的字符串游标解析成领域游标。
+func parseTimelineCursor(raw string) (*domainfeed.TimelineCursor, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+
+	content, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, domainfeed.ErrInvalidCursor
+	}
+
+	var payload timelineCursorPayload
+	if err := json.Unmarshal(content, &payload); err != nil {
+		return nil, domainfeed.ErrInvalidCursor
+	}
+
+	publishedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(payload.PublishedAt))
+	if err != nil || payload.VideoID <= 0 {
+		return nil, domainfeed.ErrInvalidCursor
+	}
+
+	return &domainfeed.TimelineCursor{
+		PublishedAt: publishedAt,
+		VideoID:     payload.VideoID,
+	}, nil
+}
+
+// encodeTimelineCursor 把排序字段编码成 URL 安全的游标字符串。
+func encodeTimelineCursor(cursor *domainfeed.TimelineCursor) string {
+	if cursor == nil || cursor.VideoID <= 0 || cursor.PublishedAt.IsZero() {
+		return ""
+	}
+
+	content, err := json.Marshal(timelineCursorPayload{
+		PublishedAt: cursor.PublishedAt.UTC().Format(time.RFC3339Nano),
+		VideoID:     cursor.VideoID,
+	})
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(content)
+}

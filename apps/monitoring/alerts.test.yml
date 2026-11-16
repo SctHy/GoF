@@ -1,0 +1,168 @@
+# 30s samples: unhealthy for 10m, then recovery.
+rule_files:
+  - "alerts.yml"
+evaluation_interval: "30s"
+tests:
+  - name: "GCFeedAPIHighErrorRate fires and resolves"
+    interval: "30s"
+    input_series:
+      - series: "gcfeed_http_requests_total{job=\"gcfeed-api\",status=\"500\"}"
+        values: "0+10x20 200+0x25"
+      - series: "gcfeed_http_requests_total{job=\"gcfeed-api\",status=\"200\"}"
+        values: "0+90x45"
+    alert_rule_test:
+      - eval_time: "9m"
+        alertname: "GCFeedAPIHighErrorRate"
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+            exp_annotations:
+              summary: "API 5xx 比例超过 5%（至少 12 请求/分钟）"
+      - eval_time: "20m"
+        alertname: "GCFeedAPIHighErrorRate"
+        exp_alerts: []
+  - name: "GCFeedAPIHighLatency fires and resolves"
+    interval: "30s"
+    input_series:
+      - series: "gcfeed_http_request_duration_seconds_bucket{job=\"gcfeed-api\",le=\"0.1\"}"
+        values: "0+0x20 0+100x25"
+      - series: "gcfeed_http_request_duration_seconds_bucket{job=\"gcfeed-api\",le=\"1\"}"
+        values: "0+100x45"
+      - series: "gcfeed_http_request_duration_seconds_bucket{job=\"gcfeed-api\",le=\"+Inf\"}"
+        values: "0+100x45"
+      - series: "gcfeed_http_request_duration_seconds_count{job=\"gcfeed-api\"}"
+        values: "0+100x45"
+    alert_rule_test:
+      - eval_time: "9m"
+        alertname: "GCFeedAPIHighLatency"
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+            exp_annotations:
+              summary: "API P95 延迟持续超过 500ms（至少 12 请求/分钟）"
+      - eval_time: "20m"
+        alertname: "GCFeedAPIHighLatency"
+        exp_alerts: []
+  - name: "GCFeedWorkerDown fires and resolves"
+    interval: "30s"
+    input_series:
+      - series: "up{job=\"gcfeed-worker\",instance=\"worker:9091\"}"
+        values: "0x20 1x25"
+    alert_rule_test:
+      - eval_time: "9m"
+        alertname: "GCFeedWorkerDown"
+        exp_alerts:
+          - exp_labels:
+              severity: "critical"
+              job: "gcfeed-worker"
+              instance: "worker:9091"
+            exp_annotations:
+              summary: "Worker 指标端点不可用"
+      - eval_time: "20m"
+        alertname: "GCFeedWorkerDown"
+        exp_alerts: []
+  - name: "GCFeedOutboxBacklog fires and resolves"
+    interval: "30s"
+    input_series:
+      - series: "gcfeed_outbox_oldest_pending_age_seconds{job=\"gcfeed-worker\"}"
+        values: "120x20 0x25"
+    alert_rule_test:
+      - eval_time: "9m"
+        alertname: "GCFeedOutboxBacklog"
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+            exp_annotations:
+              summary: "最早 Outbox 待投递事件已等待超过 60 秒"
+      - eval_time: "20m"
+        alertname: "GCFeedOutboxBacklog"
+        exp_alerts: []
+  - name: "GCFeedOutboxFailed fires and resolves"
+    interval: "30s"
+    input_series:
+      - series: "gcfeed_outbox_failed{job=\"gcfeed-worker\"}"
+        values: "1x20 0x25"
+    alert_rule_test:
+      - eval_time: "9m"
+        alertname: "GCFeedOutboxFailed"
+        exp_alerts:
+          - exp_labels:
+              severity: "critical"
+            exp_annotations:
+              summary: "Outbox 存在耗尽重试的失败事件"
+      - eval_time: "20m"
+        alertname: "GCFeedOutboxFailed"
+        exp_alerts: []
+  - name: "GCFeedOutboxSamplingFailed fires and resolves"
+    interval: "30s"
+    input_series:
+      - series: "gcfeed_outbox_stats_up{job=\"gcfeed-worker\"}"
+        values: "0x20 1x25"
+      - series: "gcfeed_outbox_stats_updated_timestamp_seconds{job=\"gcfeed-worker\"}"
+        values: "0+30x45"
+    alert_rule_test:
+      - eval_time: "9m"
+        alertname: "GCFeedOutboxSamplingFailed"
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+            exp_annotations:
+              summary: "Outbox 指标采样失败、缺失或超过 60 秒未更新"
+      - eval_time: "20m"
+        alertname: "GCFeedOutboxSamplingFailed"
+        exp_alerts: []
+  - name: "API ignores negligible traffic"
+    interval: "30s"
+    input_series:
+      - series: "gcfeed_http_requests_total{job=\"gcfeed-api\",status=\"500\"}"
+        values: "0+1x40"
+    alert_rule_test:
+      - eval_time: "15m"
+        alertname: "GCFeedAPIHighErrorRate"
+        exp_alerts: []
+  - name: "missing worker scrape and missing outbox series are visible"
+    interval: "30s"
+    input_series: []
+    alert_rule_test:
+      - eval_time: "2m"
+        alertname: "GCFeedWorkerDown"
+        exp_alerts:
+          - exp_labels:
+              severity: "critical"
+              job: "gcfeed-worker"
+            exp_annotations:
+              summary: "Worker 指标端点不可用"
+      - eval_time: "2m"
+        alertname: "GCFeedOutboxSamplingFailed"
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              job: "gcfeed-worker"
+            exp_annotations:
+              summary: "Outbox 指标采样失败、缺失或超过 60 秒未更新"
+      - eval_time: "2m"
+        alertname: "GCFeedAPIDown"
+        exp_alerts:
+          - exp_labels:
+              severity: "critical"
+              job: "gcfeed-api"
+            exp_annotations:
+              summary: "API 指标端点不可用"
+  - name: "API down fires and resolves"
+    interval: "30s"
+    input_series:
+      - series: "up{job=\"gcfeed-api\",instance=\"api:8080\"}"
+        values: "0x20 1x25"
+    alert_rule_test:
+      - eval_time: "9m"
+        alertname: "GCFeedAPIDown"
+        exp_alerts:
+          - exp_labels:
+              severity: "critical"
+              job: "gcfeed-api"
+              instance: "api:8080"
+            exp_annotations:
+              summary: "API 指标端点不可用"
+      - eval_time: "20m"
+        alertname: "GCFeedAPIDown"
+        exp_alerts: []
